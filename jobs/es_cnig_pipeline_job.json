@@ -1,0 +1,240 @@
+{
+  "name": "intl_flood_es_cnig_pipeline",
+  "description": "Monthly ingestion of Spain CNIG flood hazard GeoTIFF rasters (1m resolution) per Demarcación Hidrográfica: bronze scrape → silver normalise → gold catalogue → chunked GeoTIFF download → Sedona raster ingest. Runs on the first Saturday of each month at 02:00 Europe/Madrid time. Parameterised per Demarcación — default: Ebro (proof of concept). Files are ~732 MB each; cluster is memory-optimised.",
+  "tags": {
+    "project": "spain-flood",
+    "source": "es_cnig",
+    "country": "ES",
+    "layer": "medallion",
+    "data_type": "raster",
+    "owner": "mapguru"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 0 2 ? * 7#1",
+    "timezone_id": "Europe/Madrid",
+    "pause_status": "PAUSED"
+  },
+  "job_clusters": [
+    {
+      "job_cluster_key": "es_cnig_scrape_cluster",
+      "new_cluster": {
+        "spark_version": "17.3.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "num_workers": 2,
+        "spark_conf": {
+          "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+          "spark.kryo.registrator": "org.apache.sedona.core.serde.SedonaKryoRegistrator",
+          "spark.sql.extensions": "org.apache.sedona.viz.sql.SedonaVizExtensions,org.apache.sedona.sql.SedonaSqlExtensions"
+        },
+        "libraries": [
+          {
+            "maven": {
+              "coordinates": "org.apache.sedona:sedona-spark-shaded-4.0_2.13:1.8.1"
+            }
+          },
+          {
+            "maven": {
+              "coordinates": "org.datasyslab:geotools-wrapper:1.8.1-28.2"
+            }
+          },
+          {
+            "pypi": {
+              "package": "beautifulsoup4"
+            }
+          }
+        ],
+        "azure_attributes": {
+          "availability": "ON_DEMAND_AZURE",
+          "first_on_demand": 1,
+          "spot_bid_max_price": -1
+        },
+        "init_scripts": []
+      }
+    },
+    {
+      "job_cluster_key": "es_cnig_download_cluster",
+      "new_cluster": {
+        "spark_version": "17.3.x-scala2.13",
+        "node_type_id": "Standard_DS5_v2",
+        "num_workers": 1,
+        "spark_conf": {
+          "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+          "spark.kryo.registrator": "org.apache.sedona.core.serde.SedonaKryoRegistrator",
+          "spark.sql.extensions": "org.apache.sedona.viz.sql.SedonaVizExtensions,org.apache.sedona.sql.SedonaSqlExtensions",
+          "spark.driver.memory": "32g",
+          "spark.executor.memory": "32g"
+        },
+        "libraries": [
+          {
+            "maven": {
+              "coordinates": "org.apache.sedona:sedona-spark-shaded-4.0_2.13:1.8.1"
+            }
+          },
+          {
+            "maven": {
+              "coordinates": "org.datasyslab:geotools-wrapper:1.8.1-28.2"
+            }
+          },
+          {
+            "pypi": {
+              "package": "beautifulsoup4"
+            }
+          }
+        ],
+        "azure_attributes": {
+          "availability": "ON_DEMAND_AZURE",
+          "first_on_demand": 1,
+          "spot_bid_max_price": -1
+        },
+        "init_scripts": []
+      }
+    },
+    {
+      "job_cluster_key": "es_cnig_ingest_cluster",
+      "new_cluster": {
+        "spark_version": "17.3.x-scala2.13",
+        "node_type_id": "Standard_E64ds_v5",
+        "num_workers": 1,
+        "spark_conf": {
+          "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+          "spark.kryo.registrator": "org.apache.sedona.core.serde.SedonaKryoRegistrator",
+          "spark.sql.extensions": "org.apache.sedona.viz.sql.SedonaVizExtensions,org.apache.sedona.sql.SedonaSqlExtensions",
+          "spark.driver.memory": "56g",
+          "spark.executor.memory": "56g",
+          "spark.driver.maxResultSize": "8g"
+        },
+        "libraries": [
+          {
+            "maven": {
+              "coordinates": "org.apache.sedona:sedona-spark-shaded-4.0_2.13:1.8.1"
+            }
+          },
+          {
+            "maven": {
+              "coordinates": "org.datasyslab:geotools-wrapper:1.8.1-28.2"
+            }
+          }
+        ],
+        "azure_attributes": {
+          "availability": "ON_DEMAND_AZURE",
+          "first_on_demand": 1,
+          "spot_bid_max_price": -1
+        },
+        "init_scripts": []
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "es_cnig_01_bronze_scrape",
+      "description": "Scrape the CNIG Centro de Descargas catalog page for the selected Demarcación Hidrográfica to discover available GeoTIFF flood hazard tiles. HEAD-check each tile for size and Last-Modified. Write metadata to bronze_es_cnig_datasets Delta table.",
+      "job_cluster_key": "es_cnig_scrape_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_cnig/es_cnig_01_bronze_scrape",
+        "base_parameters": {
+          "scrape_version": "1.0.0",
+          "demarcacion": "Ebro",
+          "skip_unchanged": "true",
+          "discover_only": "false"
+        }
+      },
+      "timeout_seconds": 3600,
+      "max_retries": 1,
+      "min_retry_interval_millis": 300000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_cnig_02_silver_normalize",
+      "description": "Normalise and classify bronze CNIG tile records: map return periods to AEP %, assign Spanish/English probability classes, infer ETRS89 UTM CRS from demarcación geography, compute deterministic raster_id. MERGE into silver_es_cnig_datasets.",
+      "depends_on": [
+        {"task_key": "es_cnig_01_bronze_scrape"}
+      ],
+      "job_cluster_key": "es_cnig_scrape_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_cnig/es_cnig_02_silver_normalize",
+        "base_parameters": {
+          "bronze_run_id": "{{tasks.es_cnig_01_bronze_scrape.values.run_id}}",
+          "full_refresh": "false",
+          "demarcacion": "Ebro"
+        }
+      },
+      "timeout_seconds": 1800,
+      "max_retries": 1,
+      "min_retry_interval_millis": 120000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_cnig_03_gold_catalog",
+      "description": "Build the CNIG-specific gold catalog (gold_es_cnig_raster_catalog, full Demarcación-scoped overwrite) and MERGE catalog entries into the shared au_flood_raster_catalog with _source='ES_CNIG'. Spatial columns remain NULL until raster ingest completes.",
+      "depends_on": [
+        {"task_key": "es_cnig_02_silver_normalize"}
+      ],
+      "job_cluster_key": "es_cnig_scrape_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_cnig/es_cnig_03_gold_catalog",
+        "base_parameters": {
+          "silver_run_id": "{{tasks.es_cnig_01_bronze_scrape.values.run_id}}",
+          "full_refresh": "false",
+          "demarcacion": "Ebro"
+        }
+      },
+      "timeout_seconds": 1800,
+      "max_retries": 1,
+      "min_retry_interval_millis": 60000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_cnig_04_download",
+      "description": "Download CNIG flood hazard GeoTIFF files (~732 MB each) to the UC Volume /Volumes/main/flood_risk/raw/es_cnig/. Implements 4 MB chunked streaming with HTTP Range resume, retry with exponential backoff, and optional SHA-256 integrity check. Sequential by default (max_workers=1) to respect CNIG server limits.",
+      "depends_on": [
+        {"task_key": "es_cnig_03_gold_catalog"}
+      ],
+      "job_cluster_key": "es_cnig_download_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_cnig/es_cnig_04_download",
+        "base_parameters": {
+          "run_id": "{{tasks.es_cnig_01_bronze_scrape.values.run_id}}",
+          "demarcacion": "Ebro",
+          "return_period": "all",
+          "retry_failed": "false",
+          "max_workers": "1",
+          "batch_size": "1",
+          "verify_checksum": "false"
+        }
+      },
+      "timeout_seconds": 43200,
+      "max_retries": 1,
+      "min_retry_interval_millis": 600000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_cnig_05_raster_ingest",
+      "description": "Ingest downloaded CNIG GeoTIFFs via Apache Sedona RS_* functions. Extracts: CRS (ETRS89 UTM → WGS84 reproject), pixel dimensions, NoData, bounding box, and band 1 statistics. batch_size=1 for 732 MB files. Updates silver_es_cnig_raster_tiles (new table) and au_flood_raster_catalog spatial columns. Requires Standard_E64ds_v5 memory-optimised cluster node.",
+      "depends_on": [
+        {"task_key": "es_cnig_04_download"}
+      ],
+      "job_cluster_key": "es_cnig_ingest_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_cnig/es_cnig_05_raster_ingest",
+        "base_parameters": {
+          "run_id": "{{tasks.es_cnig_01_bronze_scrape.values.run_id}}",
+          "demarcacion": "Ebro",
+          "return_period": "all",
+          "full_refresh": "false",
+          "batch_size": "1"
+        }
+      },
+      "timeout_seconds": 14400,
+      "max_retries": 0,
+      "email_notifications": {}
+    }
+  ],
+  "email_notifications": {
+    "on_failure": [
+      "kyle.ryan@mapguru.com"
+    ],
+    "no_alert_for_skipped_runs": true
+  },
+  "max_concurrent_runs": 1,
+  "format": "MULTI_TASK"
+}
