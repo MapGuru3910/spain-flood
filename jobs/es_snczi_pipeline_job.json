@@ -1,0 +1,177 @@
+{
+  "name": "intl_flood_es_snczi_pipeline",
+  "description": "Monthly ingestion of Spain SNCZI national flood zone data (MITECO/CNIG): bronze scrape + download → silver normalise → gold catalogue → supplementary download → raster ingest (Phase 2 placeholder). Runs on the first Sunday of each month at 04:00 Europe/Madrid time.",
+  "tags": {
+    "project": "spain-flood",
+    "source": "es_snczi",
+    "country": "ES",
+    "layer": "medallion",
+    "owner": "mapguru"
+  },
+  "schedule": {
+    "quartz_cron_expression": "0 0 4 ? * 1#1",
+    "timezone_id": "Europe/Madrid",
+    "pause_status": "PAUSED"
+  },
+  "job_clusters": [
+    {
+      "job_cluster_key": "es_snczi_cluster",
+      "new_cluster": {
+        "spark_version": "17.3.x-scala2.13",
+        "node_type_id": "Standard_DS4_v2",
+        "autoscale": {
+          "min_workers": 2,
+          "max_workers": 4
+        },
+        "spark_conf": {
+          "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
+          "spark.kryo.registrator": "org.apache.sedona.core.serde.SedonaKryoRegistrator",
+          "spark.sql.extensions": "org.apache.sedona.viz.sql.SedonaVizExtensions,org.apache.sedona.sql.SedonaSqlExtensions"
+        },
+        "libraries": [
+          {
+            "maven": {
+              "coordinates": "org.apache.sedona:sedona-spark-shaded-4.0_2.13:1.8.1"
+            }
+          },
+          {
+            "maven": {
+              "coordinates": "org.datasyslab:geotools-wrapper:1.8.1-28.2"
+            }
+          },
+          {
+            "pypi": {
+              "package": "geopandas"
+            }
+          },
+          {
+            "pypi": {
+              "package": "pyproj"
+            }
+          },
+          {
+            "pypi": {
+              "package": "fiona"
+            }
+          },
+          {
+            "pypi": {
+              "package": "shapely"
+            }
+          }
+        ],
+        "init_scripts": [],
+        "azure_attributes": {
+          "availability": "ON_DEMAND_AZURE",
+          "first_on_demand": 1,
+          "spot_bid_max_price": -1
+        }
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "es_snczi_01_bronze_scrape",
+      "description": "Enumerate SNCZI flood zone datasets, HEAD-check availability, download SHP ZIPs to UC Volume, and write metadata to bronze Delta table.",
+      "job_cluster_key": "es_snczi_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_snczi/es_snczi_01_bronze_scrape",
+        "base_parameters": {
+          "scrape_version": "1.0.0",
+          "download_files": "true",
+          "skip_unchanged": "true"
+        }
+      },
+      "timeout_seconds": 7200,
+      "max_retries": 1,
+      "min_retry_interval_millis": 300000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_snczi_02_silver_normalize",
+      "description": "Extract SHP files from downloaded ZIPs, reproject ETRS89 UTM → WGS84, map Spanish field names to English schema, classify AEP, and MERGE into silver flood zones table.",
+      "depends_on": [
+        {"task_key": "es_snczi_01_bronze_scrape"}
+      ],
+      "job_cluster_key": "es_snczi_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_snczi/es_snczi_02_silver_normalize",
+        "base_parameters": {
+          "bronze_run_id": "{{tasks.es_snczi_01_bronze_scrape.values.run_id}}",
+          "full_refresh": "false",
+          "max_features_per_file": "0"
+        }
+      },
+      "timeout_seconds": 7200,
+      "max_retries": 1,
+      "min_retry_interval_millis": 120000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_snczi_03_gold_catalog",
+      "description": "Build gold-layer SNCZI flood zone catalog (full overwrite) and source-scoped refresh of shared au_flood_report_index.",
+      "depends_on": [
+        {"task_key": "es_snczi_02_silver_normalize"}
+      ],
+      "job_cluster_key": "es_snczi_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_snczi/es_snczi_03_gold_catalog",
+        "base_parameters": {
+          "silver_run_id": "{{tasks.es_snczi_01_bronze_scrape.values.run_id}}",
+          "full_refresh": "false"
+        }
+      },
+      "timeout_seconds": 3600,
+      "max_retries": 1,
+      "min_retry_interval_millis": 60000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_snczi_04_download",
+      "description": "Download any supplementary PDF reports or KMZ files from SNCZI/MITECO not yet downloaded. Typically a no-op for standard SHP runs (ZIPs are downloaded in notebook 01).",
+      "depends_on": [
+        {"task_key": "es_snczi_03_gold_catalog"}
+      ],
+      "job_cluster_key": "es_snczi_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_snczi/es_snczi_04_download",
+        "base_parameters": {
+          "run_id": "{{tasks.es_snczi_01_bronze_scrape.values.run_id}}",
+          "resource_formats": "all",
+          "retry_failed": "false",
+          "max_workers": "2",
+          "batch_size": "5"
+        }
+      },
+      "timeout_seconds": 7200,
+      "max_retries": 1,
+      "min_retry_interval_millis": 300000,
+      "email_notifications": {}
+    },
+    {
+      "task_key": "es_snczi_05_raster_ingest",
+      "description": "Phase 2 placeholder. Logs skip with explanation pointing to future es_cnig/ notebooks for CNIG GeoTIFF flood hazard raster ingestion. No rasters are processed in Phase 1.",
+      "depends_on": [
+        {"task_key": "es_snczi_04_download"}
+      ],
+      "job_cluster_key": "es_snczi_cluster",
+      "notebook_task": {
+        "notebook_path": "/Workspace/Users/kyle.ryan@mapguru.com/spain-flood/notebooks/es_snczi/es_snczi_05_raster_ingest",
+        "base_parameters": {
+          "run_id": "{{tasks.es_snczi_01_bronze_scrape.values.run_id}}"
+        }
+      },
+      "timeout_seconds": 1800,
+      "max_retries": 0,
+      "email_notifications": {}
+    }
+  ],
+  "email_notifications": {
+    "on_failure": [
+      "kyle.ryan@mapguru.com"
+    ],
+    "no_alert_for_skipped_runs": true
+  },
+  "max_concurrent_runs": 1,
+  "format": "MULTI_TASK"
+}
